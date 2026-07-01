@@ -21,16 +21,19 @@ CALENDAR_CACHE_PATH = PROJECT_ROOT / ".cache" / "ff_calendar_thisweek.xml"
 def get_high_impact_events_today(
     now: Optional[datetime] = None,
     currencies: Sequence[str] = RELEVANT_CURRENCIES,
-) -> Dict[str, Any]:
-    """Return today's relevant economic-calendar events with mock fallback."""
+) -> Optional[Dict[str, Any]]:
+    """Return today's relevant economic-calendar events.
+
+    Returns None when the calendar cannot be retrieved (download fails and
+    there is no cached copy).
+    """
     current = as_utc(now or utc_now())
     wanted = {currency.upper() for currency in currencies}
 
     try:
         events, source = _load_forex_factory_events()
     except Exception:
-        events = _mock_events(current)
-        source = "mock"
+        return None
 
     today = current.astimezone(BERLIN_TZ).date()
     today_events = [event for event in events if _event_local_date(event) == today]
@@ -141,10 +144,6 @@ def _node_text(node: ElementTree.Element, name: str) -> str:
     if child is None or child.text is None:
         return ""
     return child.text.strip()
-
-
-def _mock_events(current: datetime) -> List[Dict[str, Any]]:
-    return []
 
 
 def has_news_within_minutes(events: List[Dict[str, Any]], now: datetime, minutes: int) -> bool:

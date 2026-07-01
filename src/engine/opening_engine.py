@@ -7,68 +7,6 @@ from typing import Any, Dict, Optional
 import pandas as pd
 
 
-def analyze_opening_range(
-    current_price: float,
-    opening_range: Optional[Dict[str, Any]],
-    candles: Optional[pd.DataFrame],
-) -> Dict[str, Any]:
-    """Analyze current location and wick raids around an opening range."""
-    if not opening_range:
-        return {
-            "state": "unknown",
-            "css_class": "open-flat",
-            "text_class": "",
-            "label": "Opening range unavailable",
-            "detail": "No candle source available.",
-            "raid_high": False,
-            "raid_low": False,
-        }
-
-    high = max(float(opening_range["high"]), float(opening_range["low"]))
-    low = min(float(opening_range["high"]), float(opening_range["low"]))
-    opened_at = opening_range.get("time_utc")
-    after = _candles_after(candles, opened_at)
-    raid_high = bool(after is not None and not after.empty and float(after["high"].max()) > high)
-    raid_low = bool(after is not None and not after.empty and float(after["low"].min()) < low)
-
-    if low <= current_price <= high:
-        state = "inside"
-        css_class = "open-flat"
-        text_class = ""
-        label = "Inside range"
-    elif current_price > high:
-        state = "above"
-        css_class = "open-above"
-        text_class = "opening-struck" if raid_low else ""
-        label = "Above range"
-    else:
-        state = "below"
-        css_class = "open-below"
-        text_class = "opening-struck" if raid_high else ""
-        label = "Below range"
-
-    detail_bits = []
-    if raid_high:
-        detail_bits.append("raid high")
-    if raid_low:
-        detail_bits.append("raid low")
-    detail = ", ".join(detail_bits) if detail_bits else "no raid yet"
-
-    return {
-        "state": state,
-        "css_class": css_class,
-        "text_class": text_class,
-        "label": label,
-        "detail": detail,
-        "raid_high": raid_high,
-        "raid_low": raid_low,
-        "open": float(opening_range["open"]),
-        "high": high,
-        "low": low,
-        "source_label": opening_range.get("label", ""),
-    }
-
-
 def _candles_after(candles: Optional[pd.DataFrame], opened_at: Any) -> Optional[pd.DataFrame]:
     if candles is None or candles.empty or opened_at is None:
         return None

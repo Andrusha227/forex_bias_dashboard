@@ -1,26 +1,31 @@
-"""Pure scoring functions for EUR/USD macro bias."""
+"""Normalized scoring engine for EUR/USD macro bias.
+
+Category weights:
+  Monthly Structure: 3 — highest-timeframe price structure
+  Weekly Structure:  2 — active trading-week context
+  Rates & Yield Curve: 2 — primary FX driver
+  Liquidity: 2 — risk appetite driver
+  Inflation: 1.5 — rate expectations context
+  Labor: 1.5 — Fed policy context
+  Growth: 1 — backdrop context
+"""
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-
-ScoreResult = Dict[str, Any]
-
-
-def _add_contribution(
-    contributions: List[Dict[str, Any]],
-    name: str,
-    value: int,
-    reason: str,
-) -> None:
-    contributions.append({"name": name, "value": value, "reason": reason})
+from src.engine.scoring import (
+    CategoryResult,
+    FactorSignal,
+    build_scoring_summary,
+    classify_verdict,
+    normalize_score,
+)
 
 
-def score_monthly(data: Dict[str, Any]) -> ScoreResult:
+def score_monthly(data: Dict[str, Any]) -> CategoryResult:
     """Score monthly bias from price location and COT positioning."""
-    score = 0
-    contributions: List[Dict[str, Any]] = []
+    cat = CategoryResult(name="Monthly Structure", weight=3)
 
     current_price = data.get("current_price")
     monthly_open_ranges = data.get("monthly_open_ranges")
@@ -28,44 +33,86 @@ def score_monthly(data: Dict[str, Any]) -> ScoreResult:
     if candles is None or (hasattr(candles, "empty") and candles.empty):
         candles = data.get("history")
 
-    cot_net = data.get("cot_net_position")
-    cot_change = data.get("cot_weekly_change")
+    eurusd_meta = data.get("eurusd_metadata") or {}
+    cot_meta = data.get("cot_metadata") or {}
 
+    # 1. Monthly Opening Range score (already in [-1, +1] from opening_engine)
+    range_signal: Optional[float] = None
+    range_reason = ""
     if current_price is not None and monthly_open_ranges:
         from src.engine.opening_engine import analyze_monthly_opening_range
         analysis = analyze_monthly_opening_range(float(current_price), monthly_open_ranges, candles)
-        range_score = analysis.get("score", 0.0)
-        score += range_score
-        _add_contribution(
-            contributions,
-            f"Monthly open range ({analysis.get('active_source', 'D')})",
-            range_score,
-            analysis.get("score_reason", "")
-        )
+        score_val = analysis.get("score", 0.0)
+        state = analysis.get("state", "")
+        # If score=0 and state='unknown', treat as unavailable
+        if score_val == 0 and state == "unknown":
+            range_signal = None
+            range_reason = "Monthly range unavailable"
+        else:
+            range_signal = float(score_val)
+            range_reason = analysis.get("score_reason", "")
+    cat.factors.append(FactorSignal(
+        name="Monthly Opening Range",
+        signal=range_signal,
+        reason=range_reason,
+        timestamp=eurusd_meta.get("timestamp", "n/a"),
+        source=eurusd_meta.get("source", "n/a"),
+        freshness=eurusd_meta.get("freshness", "unknown"),
+    ))
 
+    # 2. COT Net Position
+    cot_net = data.get("cot_net_position")
+    cot_signal: Optional[float] = None
+    cot_reason = ""
     if cot_net is not None:
         if cot_net > 0:
-            score += 1
-            _add_contribution(contributions, "COT net", 1, "EUR net position is positive")
+            cot_signal = 1.0
+            cot_reason = "EUR net position is positive"
         elif cot_net < 0:
-            score -= 1
-            _add_contribution(contributions, "COT net", -1, "EUR net position is negative")
+            cot_signal = -1.0
+            cot_reason = "EUR net position is negative"
+        else:
+            cot_signal = 0.0
+            cot_reason = "EUR net position is flat"
+    cat.factors.append(FactorSignal(
+        name="COT Net Position",
+        signal=cot_signal,
+        reason=cot_reason,
+        timestamp=cot_meta.get("timestamp", "n/a"),
+        source=cot_meta.get("source", "n/a"),
+        freshness=cot_meta.get("freshness", "unknown"),
+    ))
 
+    # 3. COT Weekly Change
+    cot_change = data.get("cot_weekly_change")
+    change_signal: Optional[float] = None
+    change_reason = ""
     if cot_change is not None:
         if cot_change > 0:
-            score += 1
-            _add_contribution(contributions, "COT weekly change", 1, "EUR net position increased week over week")
+            change_signal = 1.0
+            change_reason = "EUR net position increased week over week"
         elif cot_change < 0:
-            score -= 1
-            _add_contribution(contributions, "COT weekly change", -1, "EUR net position decreased week over week")
+            change_signal = -1.0
+            change_reason = "EUR net position decreased week over week"
+        else:
+            change_signal = 0.0
+            change_reason = "EUR net position unchanged week over week"
+    cat.factors.append(FactorSignal(
+        name="COT Weekly Change",
+        signal=change_signal,
+        reason=change_reason,
+        timestamp=cot_meta.get("timestamp", "n/a"),
+        source=cot_meta.get("source", "n/a"),
+        freshness=cot_meta.get("freshness", "unknown"),
+    ))
 
-    return {"score": score, "contributions": contributions}
+    cat.compute()
+    return cat
 
 
-def score_weekly(data: Dict[str, Any]) -> ScoreResult:
-    """Score weekly bias from EUR/USD, DXY, and US yield direction."""
-    score = 0
-    contributions: List[Dict[str, Any]] = []
+def score_weekly(data: Dict[str, Any]) -> CategoryResult:
+    """Score weekly bias from EUR/USD opening range and DXY direction."""
+    cat = CategoryResult(name="Weekly Structure", weight=2)
 
     current_price = data.get("current_price")
     weekly_open_ranges = data.get("weekly_open_ranges")
@@ -73,76 +120,62 @@ def score_weekly(data: Dict[str, Any]) -> ScoreResult:
     if candles is None or (hasattr(candles, "empty") and candles.empty):
         candles = data.get("history")
 
+    eurusd_meta = data.get("eurusd_metadata") or {}
+    dxy_meta = data.get("dxy_metadata") or {}
+
+    # 1. Weekly Opening Range score (already in [-1, +1] from opening_engine)
+    range_signal: Optional[float] = None
+    range_reason = ""
     if current_price is not None and weekly_open_ranges:
         from src.engine.opening_engine import analyze_weekly_opening_range
         analysis = analyze_weekly_opening_range(float(current_price), weekly_open_ranges, candles)
-        range_score = analysis.get("score", 0.0)
-        score += range_score
-        _add_contribution(
-            contributions,
-            f"Weekly open range ({analysis.get('active_source', '4H')})",
-            range_score,
-            analysis.get("score_reason", "")
-        )
+        score_val = analysis.get("score", 0.0)
+        state = analysis.get("state", "")
+        if score_val == 0 and state == "unknown":
+            range_signal = None
+            range_reason = "Weekly range unavailable"
+        else:
+            range_signal = float(score_val)
+            range_reason = analysis.get("score_reason", "")
+    cat.factors.append(FactorSignal(
+        name="Weekly Opening Range",
+        signal=range_signal,
+        reason=range_reason,
+        timestamp=eurusd_meta.get("timestamp", "n/a"),
+        source=eurusd_meta.get("source", "n/a"),
+        freshness=eurusd_meta.get("freshness", "unknown"),
+    ))
 
-    direction_rules = {
-        "dxy_direction": ("DXY", "falling", "rising"),
-        "us2y_direction": ("US2Y", "falling", "rising"),
-        "us10y_direction": ("US10Y", "falling", "rising"),
-    }
+    # 2. DXY Direction — falling = EUR+, rising = EUR-
+    dxy_direction = str(data.get("dxy_direction", "")).lower()
+    dxy_signal: Optional[float] = None
+    dxy_reason = ""
+    if dxy_direction == "falling":
+        dxy_signal = 1.0
+        dxy_reason = "DXY is falling"
+    elif dxy_direction == "rising":
+        dxy_signal = -1.0
+        dxy_reason = "DXY is rising"
+    cat.factors.append(FactorSignal(
+        name="DXY Direction",
+        signal=dxy_signal,
+        reason=dxy_reason,
+        timestamp=dxy_meta.get("timestamp", "n/a"),
+        source=dxy_meta.get("source", "n/a"),
+        freshness=dxy_meta.get("freshness", "unknown"),
+    ))
 
-    for key, (label, bullish_value, bearish_value) in direction_rules.items():
-        direction = str(data.get(key, "")).lower()
-        if direction == bullish_value:
-            score += 1
-            _add_contribution(contributions, label, 1, f"{label} is falling")
-        elif direction == bearish_value:
-            score -= 1
-            _add_contribution(contributions, label, -1, f"{label} is rising")
-
-    return {"score": score, "contributions": contributions}
-
-
-def score_intraday(data: Dict[str, Any]) -> ScoreResult:
-    """Score intraday context from Asia range and news risk."""
-    score = 0
-    contributions: List[Dict[str, Any]] = []
-
-    current_price = data.get("current_price")
-    asia_high = data.get("asia_high")
-    asia_low = data.get("asia_low")
-    news_within_60m = bool(data.get("news_within_60m"))
-
-    if current_price is not None and asia_high is not None and current_price > asia_high:
-        score += 1
-        _add_contribution(contributions, "Asia high", 1, "Price reclaimed Asia high")
-    elif current_price is not None and asia_low is not None and current_price < asia_low:
-        score -= 1
-        _add_contribution(contributions, "Asia low", -1, "Price broke Asia low")
-
-    if news_within_60m:
-        score -= 1
-        _add_contribution(contributions, "High impact news", -1, "High impact news is within the next 60 minutes")
-
-    return {"score": score, "contributions": contributions}
+    cat.compute()
+    return cat
 
 
-def score_total(
-    monthly: ScoreResult,
-    weekly: ScoreResult,
-    intraday: ScoreResult,
-    macro: Optional[ScoreResult] = None,
-) -> ScoreResult:
-    """Combine section scores and return the final label."""
-    core_score = int(monthly.get("score", 0)) + int(weekly.get("score", 0)) + int(intraday.get("score", 0))
-    macro_score = int((macro or {}).get("score", 0))
-    total = core_score + macro_score
+def score_total(categories: List[CategoryResult]) -> Dict[str, Any]:
+    """Combine all category results into a final normalized score and verdict.
 
-    if total >= 3:
-        label = "Bullish EUR/USD"
-    elif total <= -3:
-        label = "Bearish EUR/USD"
-    else:
-        label = "Neutral / Wait"
-
-    return {"score": total, "core_score": core_score, "macro_score": macro_score, "label": label}
+    Returns a dict with:
+      - 'normalized_score': float in [-1, +1] or None
+      - 'verdict': one of 5 verdict tiers
+      - 'categories': list of per-category detail dicts
+      - 'partial': bool — whether any data was missing
+    """
+    return build_scoring_summary(categories)

@@ -1,4 +1,17 @@
-"""FRED series catalog used by the macro regime layer."""
+"""FRED series catalog used by the macro regime layer.
+
+Weighting rationale — duplicate / correlation avoidance:
+  • DFF kept as the sole Fed-policy-rate series.
+    EFFR, DFEDTARU, DFEDTARL removed: they move in lock-step with DFF
+    and would over-weight a single policy decision.
+  • DGS3MO, DGS1 removed: dominated by the policy rate already
+    captured by DFF; adds noise without new information.
+  • DTWEXBGS (Trade-Weighted Broad Dollar) removed: highly correlated
+    with DXY which is already scored in the Weekly Structure category.
+  • WTREGEN (Treasury General Account) and RRPONTSYD (Overnight Reverse
+    Repo) added to enable the Net Liquidity indicator:
+    Net Liquidity = WALCL − WTREGEN − RRPONTSYD
+"""
 
 from __future__ import annotations
 
@@ -8,11 +21,6 @@ from typing import Dict
 FRED_SERIES: Dict[str, Dict[str, str]] = {
     "rates": {
         "Fed Funds": "DFF",
-        "EFFR": "EFFR",
-        "Fed Target Upper": "DFEDTARU",
-        "Fed Target Lower": "DFEDTARL",
-        "US3M": "DGS3MO",
-        "US1Y": "DGS1",
         "US2Y": "DGS2",
         "US5Y": "DGS5",
         "US10Y": "DGS10",
@@ -30,8 +38,9 @@ FRED_SERIES: Dict[str, Dict[str, str]] = {
     },
     "liquidity": {
         "Fed Balance Sheet": "WALCL",
+        "Treasury General Account": "WTREGEN",
+        "Reverse Repo": "RRPONTSYD",
         "SOFR": "SOFR",
-        "Trade Weighted Dollar": "DTWEXBGS",
     },
     "growth": {
         "GDP": "GDP",
@@ -39,4 +48,3 @@ FRED_SERIES: Dict[str, Dict[str, str]] = {
         "Industrial Production": "INDPRO",
     },
 }
-

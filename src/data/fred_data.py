@@ -1,9 +1,9 @@
-"""FRED data adapters for US yields and macro regime data."""
+"""FRED data adapters for US yields, macro regime data, and derived indicators."""
 
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import requests
@@ -15,12 +15,15 @@ from src.data.fred_catalog import FRED_SERIES
 FRED_OBSERVATIONS_URL = "https://api.stlouisfed.org/fred/series/observations"
 
 
-def get_yield_directions() -> Dict[str, Any]:
-    """Return direction for US2Y and US10Y yields."""
+def get_yield_directions() -> Optional[Dict[str, Any]]:
+    """Return direction for US2Y and US10Y yields.
+
+    Returns None when the FRED API key is missing or the API call fails.
+    """
     load_dotenv()
     api_key = os.getenv("FRED_API_KEY")
     if not api_key:
-        return _mock_yields()
+        return None
 
     try:
         us2y = _fetch_fred_series("DGS2", api_key)
@@ -31,19 +34,22 @@ def get_yield_directions() -> Dict[str, Any]:
             "us10y": _series_direction(us10y),
         }
     except Exception:
-        return _mock_yields()
+        return None
 
 
 def get_macro_regime_data() -> Dict[str, Any]:
-    """Return grouped macro data from FRED, falling back per series when needed."""
+    """Return grouped macro data from FRED.
+
+    Each individual series that fails is set to None in its group dict
+    rather than fabricating mock values.
+    """
     load_dotenv()
     api_key = os.getenv("FRED_API_KEY")
     if not api_key:
-        return _mock_macro_regime_data()
+        return {"source": "unavailable", "groups": {}}
 
     groups: Dict[str, Dict[str, Any]] = {}
-    used_mock = False
-    used_fred = False
+    any_success = False
 
     for group_name, series_map in FRED_SERIES.items():
         groups[group_name] = {}
@@ -51,20 +57,167 @@ def get_macro_regime_data() -> Dict[str, Any]:
             try:
                 points = _fetch_fred_points(series_id, api_key)
                 groups[group_name][label] = _points_direction(series_id, points, source="fred")
-                used_fred = True
+                any_success = True
             except Exception:
-                groups[group_name][label] = _mock_macro_point(group_name, label, series_id)
-                used_mock = True
+                groups[group_name][label] = None
 
-    if used_fred and used_mock:
-        source = "fred + mock fallback"
-    elif used_fred:
-        source = "fred"
-    else:
-        source = "mock"
-
+    source = "fred" if any_success else "unavailable"
     return {"source": source, "groups": groups}
 
+
+def get_yield_spread() -> Optional[Dict[str, Any]]:
+    """Fetch DGS10 and DGS2, return the 10Y-2Y yield spread with direction.
+
+    Returns {source, current_spread, previous_spread, direction, timestamp, freshness} or None.
+    """
+    load_dotenv()
+    api_key = os.getenv("FRED_API_KEY")
+    if not api_key:
+        return None
+
+    try:
+        dgs10_points = _fetch_fred_points("DGS10", api_key, limit=15)
+        dgs2_points = _fetch_fred_points("DGS2", api_key, limit=15)
+
+        df_10 = pd.DataFrame(dgs10_points)
+        df_2 = pd.DataFrame(dgs2_points)
+
+        df_10["date"] = pd.to_datetime(df_10["date"])
+        df_2["date"] = pd.to_datetime(df_2["date"])
+
+        df_10 = df_10.sort_values("date")
+        df_2 = df_2.sort_values("date")
+
+        merged = pd.merge_asof(
+            df_10,
+            df_2,
+            on="date",
+            suffixes=("_10", "_2"),
+            direction="backward"
+        )
+        merged["spread"] = merged["value_10"] - merged["value_2"]
+        merged = merged.dropna(subset=["spread"])
+
+        if len(merged) < 2:
+            raise ValueError("Not enough aligned points for yield spread")
+
+        current_row = merged.iloc[-1]
+        previous_row = merged.iloc[-2]
+
+        current_spread = float(current_row["spread"])
+        previous_spread = float(previous_row["spread"])
+
+        if current_spread > previous_spread:
+            direction = "steepening"
+        elif current_spread < previous_spread:
+            direction = "flattening"
+        else:
+            direction = "flat"
+
+        current_date_str = current_row["date"].strftime("%Y-%m-%d")
+        
+        # Freshness calculation
+        from datetime import datetime, timezone
+        age_days = (datetime.now(timezone.utc).date() - current_row["date"].date()).days
+        freshness = "fresh" if age_days <= 10 else "stale"
+
+        return {
+            "source": "fred",
+            "current_spread": round(current_spread, 4),
+            "previous_spread": round(previous_spread, 4),
+            "direction": direction,
+            "timestamp": current_date_str,
+            "freshness": freshness,
+        }
+    except Exception:
+        return None
+
+
+def get_net_liquidity() -> Optional[Dict[str, Any]]:
+    """Fetch WALCL, WTREGEN, RRPONTSYD and calculate net liquidity.
+
+    Net Liquidity = WALCL - WTREGEN - RRPONTSYD
+
+    Returns {source, current, previous, direction, timestamp, freshness} or None.
+    """
+    load_dotenv()
+    api_key = os.getenv("FRED_API_KEY")
+    if not api_key:
+        return None
+
+    try:
+        walcl = _fetch_fred_points("WALCL", api_key, limit=8)
+        wtregen = _fetch_fred_points("WTREGEN", api_key, limit=40)
+        rrpontsyd = _fetch_fred_points("RRPONTSYD", api_key, limit=40)
+
+        df_walcl = pd.DataFrame(walcl)
+        df_wtregen = pd.DataFrame(wtregen)
+        df_rrpontsyd = pd.DataFrame(rrpontsyd)
+
+        df_walcl["date"] = pd.to_datetime(df_walcl["date"])
+        df_wtregen["date"] = pd.to_datetime(df_wtregen["date"])
+        df_rrpontsyd["date"] = pd.to_datetime(df_rrpontsyd["date"])
+
+        df_walcl = df_walcl.sort_values("date")
+        df_wtregen = df_wtregen.sort_values("date")
+        df_rrpontsyd = df_rrpontsyd.sort_values("date")
+
+        merged = pd.merge_asof(
+            df_walcl,
+            df_wtregen,
+            on="date",
+            suffixes=("_walcl", "_wtregen"),
+            direction="backward"
+        )
+        merged = pd.merge_asof(
+            merged,
+            df_rrpontsyd,
+            on="date",
+            direction="backward"
+        )
+        merged.rename(columns={"value": "value_rrpontsyd"}, inplace=True)
+        merged = merged.dropna(subset=["value_walcl", "value_wtregen", "value_rrpontsyd"])
+
+        # RRPONTSYD is in Billions, WALCL/WTREGEN are in Millions. Align to Millions.
+        merged["net_liquidity"] = merged["value_walcl"] - merged["value_wtregen"] - (merged["value_rrpontsyd"] * 1000.0)
+
+        if len(merged) < 2:
+            raise ValueError("Not enough aligned points for net liquidity")
+
+        current_row = merged.iloc[-1]
+        previous_row = merged.iloc[-2]
+
+        current = float(current_row["net_liquidity"])
+        previous = float(previous_row["net_liquidity"])
+
+        if current > previous:
+            direction = "rising"
+        elif current < previous:
+            direction = "falling"
+        else:
+            direction = "flat"
+
+        current_date_str = current_row["date"].strftime("%Y-%m-%d")
+
+        from datetime import datetime, timezone
+        age_days = (datetime.now(timezone.utc).date() - current_row["date"].date()).days
+        freshness = "fresh" if age_days <= 10 else "stale"
+
+        return {
+            "source": "fred",
+            "current": round(current, 2),
+            "previous": round(previous, 2),
+            "direction": direction,
+            "timestamp": current_date_str,
+            "freshness": freshness,
+        }
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 def _fetch_fred_series(series_id: str, api_key: str) -> pd.Series:
     points = _fetch_fred_points(series_id, api_key)
@@ -121,6 +274,26 @@ def _points_direction(series_id: str, points: List[Dict[str, Any]], source: str)
         direction = "falling"
     else:
         direction = "flat"
+
+    from datetime import datetime, timezone
+    try:
+        latest_date = datetime.strptime(latest["date"], "%Y-%m-%d").date()
+        age_days = (datetime.now(timezone.utc).date() - latest_date).days
+        
+        # Freshness thresholds based on series_id
+        if series_id == "GDP":
+            threshold = 130
+        elif series_id in ("CPIAUCSL", "PCEPI", "CORESTICKM159SFRBATL", "PAYEMS", "UNRATE", "RSAFS", "INDPRO"):
+            threshold = 45
+        elif series_id == "ICSA":
+            threshold = 10
+        else:
+            threshold = 10  # DFF, yield series, etc.
+            
+        freshness = "fresh" if age_days <= threshold else "stale"
+    except Exception:
+        freshness = "unknown"
+
     return {
         "series_id": series_id,
         "source": source,
@@ -129,66 +302,6 @@ def _points_direction(series_id: str, points: List[Dict[str, Any]], source: str)
         "direction": direction,
         "date": latest.get("date", ""),
         "previous_date": previous.get("date", ""),
-    }
-
-
-def _mock_yields() -> Dict[str, Any]:
-    return {
-        "source": "mock",
-        "us2y": {"latest": 4.62, "previous": 4.68, "direction": "falling"},
-        "us10y": {"latest": 4.28, "previous": 4.24, "direction": "rising"},
-    }
-
-
-def _mock_macro_regime_data() -> Dict[str, Any]:
-    groups: Dict[str, Dict[str, Any]] = {}
-    for group_name, series_map in FRED_SERIES.items():
-        groups[group_name] = {}
-        for label, series_id in series_map.items():
-            groups[group_name][label] = _mock_macro_point(group_name, label, series_id)
-    return {"source": "mock", "groups": groups}
-
-
-def _mock_macro_point(group_name: str, label: str, series_id: str) -> Dict[str, Any]:
-    mock_values = {
-        "DFF": (4.33, 4.33),
-        "EFFR": (4.33, 4.33),
-        "DFEDTARU": (4.50, 4.50),
-        "DFEDTARL": (4.25, 4.25),
-        "DGS3MO": (4.40, 4.42),
-        "DGS1": (4.12, 4.18),
-        "DGS2": (4.20, 4.05),
-        "DGS5": (4.32, 4.25),
-        "DGS10": (4.49, 4.43),
-        "DGS30": (4.98, 4.92),
-        "CPIAUCSL": (319.10, 318.90),
-        "PCEPI": (126.20, 126.05),
-        "CORESTICKM159SFRBATL": (3.40, 3.50),
-        "PAYEMS": (159900.0, 159760.0),
-        "UNRATE": (4.10, 4.00),
-        "ICSA": (245000.0, 238000.0),
-        "WALCL": (6740000.0, 6760000.0),
-        "SOFR": (4.32, 4.31),
-        "DTWEXBGS": (122.2, 121.8),
-        "GDP": (29962.0, 29698.0),
-        "RSAFS": (728000.0, 725000.0),
-        "INDPRO": (103.2, 103.0),
-    }
-    latest, previous = mock_values.get(series_id, (1.0, 1.0))
-    if latest > previous:
-        direction = "rising"
-    elif latest < previous:
-        direction = "falling"
-    else:
-        direction = "flat"
-    return {
-        "series_id": series_id,
-        "source": "mock",
-        "latest": latest,
-        "previous": previous,
-        "direction": direction,
-        "date": "mock latest",
-        "previous_date": "mock previous",
-        "group": group_name,
-        "label": label,
+        "timestamp": latest.get("date", ""),
+        "freshness": freshness,
     }
