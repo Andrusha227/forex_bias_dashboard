@@ -18,30 +18,69 @@ from src.engine.bias_engine import score_monthly, score_total, score_weekly
 from src.engine.macro_engine import score_macro_regime
 from src.engine.scoring import CategoryResult
 from src.utils.time import BERLIN_TZ
+from src.utils.translations import t, ts, translate_verdict
 
 
 def main() -> None:
     """Render the Streamlit dashboard."""
     load_dotenv()
 
+    # --- Initialize Page & Language Session State ------------------------------
+    if "lang" not in st.session_state:
+        st.session_state.lang = "en"
+    if "page" not in st.session_state:
+        st.session_state.page = "dashboard"
+
+    lang = st.session_state.lang
+
     st.set_page_config(
-        page_title="Forex Bias Dashboard",
+        page_title=t("title", lang),
         layout="wide",
         initial_sidebar_state="collapsed",
     )
     _inject_styles()
 
-    st.title("Forex Bias Dashboard")
-    st.warning("This is a decision-support dashboard, not a trading signal.")
+    # --- Sidebar Language Selector ----------------------------------------------
+    selected_lang = st.sidebar.selectbox(
+        "Language / Язык",
+        ["en", "ru"],
+        index=0 if lang == "en" else 1,
+        format_func=lambda x: "English" if x == "en" else "Русский",
+        key="lang_selector"
+    )
+    if selected_lang != lang:
+        st.session_state.lang = selected_lang
+        st.rerun()
 
-    with st.spinner("Loading market context..."):
+    # --- Render Page Views ------------------------------------------------------
+    if st.session_state.page == "learn":
+        _render_learn_page(lang)
+    else:
+        _render_dashboard_page(lang)
+
+
+def _render_dashboard_page(lang: str) -> None:
+    """Render the main dashboard page."""
+    # Top Row: Title & Navigation Button
+    col_title, col_nav = st.columns([3, 1])
+    with col_title:
+        st.title(t("title", lang))
+    with col_nav:
+        st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+        if st.button(t("learn_btn_label", lang), use_container_width=True):
+            st.session_state.page = "learn"
+            st.rerun()
+
+    with st.spinner("Loading market context..." if lang == "en" else "Загрузка данных рынка..."):
         context = _load_context()
 
     if context is None:
-        st.error("No market data sources are available.  Check your API keys and network connection.")
+        st.error("No market data sources are available. Check your API keys and network connection."
+                 if lang == "en" else
+                 "Источники рыночных данных недоступны. Проверьте API-ключи и сетевое подключение.")
         return
 
-    context = _apply_sidebar_overrides(context)
+    context = _apply_sidebar_overrides(context, lang)
 
     # --- Score all categories ---------------------------------------------------
     monthly_cat = score_monthly(context["monthly"])
@@ -56,47 +95,82 @@ def main() -> None:
     all_categories = [monthly_cat, weekly_cat] + macro_categories
     total = score_total(all_categories)
 
-    # --- Render -----------------------------------------------------------------
-    _render_final_bias(total)
+    # --- Render Verdict Box -----------------------------------------------------
+    _render_final_bias(total, lang)
 
+    # --- Renormalization / Partial Data Alert -----------------------------------
     if total.get("partial"):
         unavailable = [
-            c["name"]
+            ts(c["name"], lang)
             for c in total.get("categories", [])
             if c.get("status") == "unavailable"
         ]
         partial = [
-            c["name"]
+            ts(c["name"], lang)
             for c in total.get("categories", [])
             if c.get("status") == "partial"
         ]
         parts = []
         if unavailable:
-            parts.append(f"**Unavailable:** {', '.join(unavailable)}")
+            parts.append(f"**{t('unavailable_categories', lang)}:** {', '.join(unavailable)}")
         if partial:
-            parts.append(f"**Partial data:** {', '.join(partial)}")
+            parts.append(f"**{t('partial_categories', lang)}:** {', '.join(partial)}")
         st.info(
-            "⚠️ Verdict is based on partial data. " + " | ".join(parts) + ". "
-            "Missing categories are excluded from the normalized score."
+            t("partial_data_warn", lang) + " " + " | ".join(parts)
         )
 
-    _render_price_chart(context["eurusd"])
+    # --- Main Cards Layout ------------------------------------------------------
+    _render_price_chart(context["eurusd"], lang)
 
     col_monthly, col_weekly = st.columns(2)
     with col_monthly:
-        _render_monthly_card(context, monthly_cat)
+        _render_monthly_card(context, monthly_cat, lang)
     with col_weekly:
-        _render_weekly_card(context, weekly_cat)
+        _render_weekly_card(context, weekly_cat, lang)
 
-    _render_macro_regime(context, macro_result, total)
-    _render_diagnostics(total)
-    _render_calendar(context)
-    _render_sources(context)
+    _render_macro_regime(context, macro_result, total, lang)
+    _render_diagnostics(total, lang)
+    _render_calendar(context, lang)
+    _render_sources(context, lang)
+
+
+def _render_learn_page(lang: str) -> None:
+    """Render the educational Learn page."""
+    col_title, col_nav = st.columns([3, 1])
+    with col_title:
+        st.title(t("learn_title", lang))
+    with col_nav:
+        st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+        if st.button(t("back_btn_label", lang), use_container_width=True):
+            st.session_state.page = "dashboard"
+            st.rerun()
+
+    st.markdown(t("learn_intro", lang))
+    st.divider()
+
+    st.subheader(t("section_what_dashboard", lang))
+    st.markdown(t("what_dashboard_text", lang))
+    st.divider()
+
+    st.subheader(t("section_what_cot", lang))
+    st.markdown(t("what_cot_text", lang))
+    st.divider()
+
+    st.subheader(t("section_what_fed", lang))
+    st.markdown(t("what_fed_text", lang))
+    st.divider()
+
+    st.subheader(t("section_what_liquidity", lang))
+    st.markdown(t("what_liquidity_text", lang))
+    st.divider()
+
+    st.subheader(t("section_how_counted", lang))
+    st.markdown(t("how_counted_text", lang))
 
 
 @st.cache_data(ttl=900, show_spinner=False)
 def _load_context() -> Optional[Dict[str, Any]]:
-    """Load all data sources.  Returns None if no price data at all."""
+    """Load all data sources. Returns None if no price data at all."""
     eurusd = get_eurusd_snapshot()
     if eurusd is None:
         return None
@@ -143,18 +217,18 @@ def _load_context() -> Optional[Dict[str, Any]]:
     }
 
 
-def _apply_sidebar_overrides(context: Dict[str, Any]) -> Dict[str, Any]:
+def _apply_sidebar_overrides(context: Dict[str, Any], lang: str) -> Dict[str, Any]:
     """Apply chart-level overrides before scoring."""
     adjusted = copy.deepcopy(context)
     eurusd = adjusted["eurusd"]
 
-    st.sidebar.header("Chart Levels")
-    st.sidebar.caption("Override current EUR/USD when your broker feed is more accurate.")
+    st.sidebar.header(t("chart_levels", lang))
+    st.sidebar.caption(t("override_caption", lang))
 
-    override_current = st.sidebar.checkbox("Override current EUR/USD", value=False)
+    override_current = st.sidebar.checkbox(t("override_checkbox", lang), value=False)
     if override_current:
         current_price = st.sidebar.number_input(
-            "Current EUR/USD",
+            t("current_eurusd", lang),
             min_value=0.50000,
             max_value=2.00000,
             value=float(eurusd["current_price"]),
@@ -172,8 +246,9 @@ def _apply_sidebar_overrides(context: Dict[str, Any]) -> Dict[str, Any]:
 # Render: verdict
 # ---------------------------------------------------------------------------
 
-def _render_final_bias(total: Dict[str, Any]) -> None:
+def _render_final_bias(total: Dict[str, Any], lang: str) -> None:
     verdict = total.get("verdict", "Insufficient Data")
+    translated_verdict = translate_verdict(verdict, lang)
     normalized = total.get("normalized_score")
 
     css_class = _verdict_css(verdict)
@@ -184,9 +259,9 @@ def _render_final_bias(total: Dict[str, Any]) -> None:
     st.markdown(
         f"""
         <div class="final-bias {css_class}">
-            <div class="final-label">{verdict}</div>
+            <div class="final-label">{translated_verdict}</div>
             <div class="final-score">
-                Normalized score: {score_text} &nbsp;|&nbsp; Data coverage: {avail_w:.1f} / {total_w:.1f} weight
+                {t("normalized_score_lbl", lang)}: {score_text} &nbsp;|&nbsp; {t("data_coverage_lbl", lang)}: {avail_w:.1f} / {total_w:.1f} {t("weight_lbl", lang)}
             </div>
         </div>
         """,
@@ -211,13 +286,13 @@ def _verdict_css(verdict: str) -> str:
 # Render: price chart
 # ---------------------------------------------------------------------------
 
-def _render_price_chart(eurusd: Dict[str, Any]) -> None:
+def _render_price_chart(eurusd: Dict[str, Any], lang: str) -> None:
     history = eurusd.get("history")
     if not isinstance(history, pd.DataFrame) or history.empty:
         return
 
     chart_data = history.tail(60).copy()
-    fig = px.line(chart_data, x="date", y="close", title="EUR/USD Daily Close")
+    fig = px.line(chart_data, x="date", y="close", title=t("daily_close_title", lang))
     fig.update_layout(
         height=280,
         margin={"l": 4, "r": 4, "t": 38, "b": 4},
@@ -231,7 +306,7 @@ def _render_price_chart(eurusd: Dict[str, Any]) -> None:
 # Render: monthly card
 # ---------------------------------------------------------------------------
 
-def _render_monthly_card(context: Dict[str, Any], cat: CategoryResult) -> None:
+def _render_monthly_card(context: Dict[str, Any], cat: CategoryResult, lang: str) -> None:
     eurusd = context["eurusd"]
     cot = context.get("cot")
     current_price = eurusd["current_price"]
@@ -244,25 +319,27 @@ def _render_monthly_card(context: Dict[str, Any], cat: CategoryResult) -> None:
     from src.engine.opening_engine import analyze_monthly_opening_range
     monthly_analysis = analyze_monthly_opening_range(float(current_price), monthly_open_ranges, candles)
 
-    _card_header("Monthly Structure", cat.score, cat.weight)
-    st.metric("Current EUR/USD", _fmt_price(current_price))
+    _card_header(t("monthly_structure", lang), cat.score, cat.weight, lang)
+    st.metric(t("current_eurusd", lang), _fmt_price(current_price))
 
     active_source = monthly_analysis.get("active_source", "D")
-    _render_opening_range_chip(f"Monthly Open ({active_source})", monthly_analysis)
+    chip_title = f"{t('monthly_open', lang)} ({active_source})"
+    _render_opening_range_chip(chip_title, monthly_analysis, lang)
 
     if cot is not None:
-        st.metric("COT EUR net position", f"{cot['net_position']:,}", f"{cot['weekly_change']:+,} w/w")
+        st.metric(t("cot_net", lang), f"{cot['net_position']:,}",
+                  f"{cot['weekly_change']:+,} {t('cot_change', lang)}" if lang == "en" else f"{cot['weekly_change']:+,} к/к")
     else:
-        st.caption("COT data unavailable")
+        st.caption(t("cot_unavailable", lang))
 
-    _render_factor_signals(cat)
+    _render_factor_signals(cat, lang)
 
 
 # ---------------------------------------------------------------------------
 # Render: weekly card
 # ---------------------------------------------------------------------------
 
-def _render_weekly_card(context: Dict[str, Any], cat: CategoryResult) -> None:
+def _render_weekly_card(context: Dict[str, Any], cat: CategoryResult, lang: str) -> None:
     eurusd = context["eurusd"]
     dxy = context.get("dxy")
 
@@ -272,20 +349,20 @@ def _render_weekly_card(context: Dict[str, Any], cat: CategoryResult) -> None:
     if candles is None or (hasattr(candles, "empty") and candles.empty):
         candles = eurusd.get("history")
 
-    _card_header("Weekly Structure", cat.score, cat.weight)
-    st.metric("Current EUR/USD", _fmt_price(current_price))
+    _card_header(t("weekly_structure", lang), cat.score, cat.weight, lang)
+    st.metric(t("current_eurusd", lang), _fmt_price(current_price))
 
     # Weekly Opening Range chip
     if weekly_open_ranges:
         from src.engine.opening_engine import analyze_weekly_opening_range
         weekly_analysis = analyze_weekly_opening_range(float(current_price), weekly_open_ranges, candles)
         active_source = weekly_analysis.get("active_source", "4H")
-        _render_opening_range_chip(f"Weekly Open ({active_source})", weekly_analysis)
+        chip_title = f"{t('weekly_open', lang)} ({active_source})"
+        _render_opening_range_chip(chip_title, weekly_analysis, lang)
 
         # Also show Sunday open if available
         sunday = weekly_open_ranges.get("sunday_open")
         if sunday:
-            from src.engine.opening_engine import analyze_monthly_opening_range as _analyze
             # Re-use generic analysis for Sunday
             sunday_range = {
                 "d_open": sunday,
@@ -295,27 +372,29 @@ def _render_weekly_card(context: Dict[str, Any], cat: CategoryResult) -> None:
                 "is_after_first_week": False,
             }
 
-    st.metric("Previous week high / low",
+    st.metric(t("prev_week_high_low", lang),
               f"{_fmt_price(eurusd['previous_week_high'])} / {_fmt_price(eurusd['previous_week_low'])}")
 
     if dxy is not None:
-        st.metric("DXY direction", dxy["direction"].title(),
-                  f"{_fmt_price(dxy['latest'])} (5d: {_fmt_price(dxy.get('previous', 0))})" if dxy.get("latest") else "")
+        dxy_dir_trans = ts(dxy["direction"].title(), lang)
+        dxy_delta_lbl = f"{_fmt_price(dxy['latest'])} (5d: {_fmt_price(dxy.get('previous', 0))})" if dxy.get("latest") else ""
+        st.metric(t("dxy_direction", lang), dxy_dir_trans, dxy_delta_lbl)
     else:
-        st.caption("DXY data unavailable")
+        st.caption(t("dxy_unavailable", lang))
 
-    _render_factor_signals(cat)
+    _render_factor_signals(cat, lang)
 
 
 # ---------------------------------------------------------------------------
 # Render: macro regime
 # ---------------------------------------------------------------------------
 
-def _render_macro_regime(context: Dict[str, Any], macro_result: Dict[str, Any], total: Dict[str, Any]) -> None:
+def _render_macro_regime(context: Dict[str, Any], macro_result: Dict[str, Any], total: Dict[str, Any], lang: str) -> None:
     st.divider()
-    st.subheader("Macro Regime")
+    st.subheader(t("macro_regime", lang))
     macro_label = macro_result.get("label", "Macro Mixed")
-    st.caption(f"Regime: {macro_label}")
+    translated_macro_label = ts(macro_label, lang)
+    st.caption(f"{t('regime_lbl', lang)}: {translated_macro_label}")
 
     macro_cats: List[CategoryResult] = macro_result["categories"]
     groups = context["macro"].get("groups", {})
@@ -325,78 +404,82 @@ def _render_macro_regime(context: Dict[str, Any], macro_result: Dict[str, Any], 
     with col_rates:
         rates_cat = next((c for c in macro_cats if "Rates" in c.name), None)
         if rates_cat:
-            _card_header(rates_cat.name, rates_cat.score, rates_cat.weight)
-            _render_macro_points(groups.get("rates", {}), ("Fed Funds", "US2Y", "US10Y", "US30Y"))
+            _card_header(t("rates_yield", lang), rates_cat.score, rates_cat.weight, lang)
+            _render_macro_points(groups.get("rates", {}), ("Fed Funds", "US2Y", "US10Y", "US30Y"), lang)
             # Yield Spread
             spread = context.get("yield_spread")
             if spread:
-                st.metric("Yield Spread (10Y−2Y)",
+                spread_dir_trans = ts(spread["direction"].title(), lang)
+                st.metric(t("yield_spread", lang),
                           f"{spread['current_spread']:.4f}",
-                          spread["direction"].title())
+                          spread_dir_trans)
             else:
-                st.caption("Yield spread unavailable")
-            _render_factor_signals(rates_cat)
+                st.caption(t("yield_spread_unavail", lang))
+            _render_factor_signals(rates_cat, lang)
 
     with col_inflation:
         inf_cat = next((c for c in macro_cats if "Inflation" in c.name), None)
         if inf_cat:
-            _card_header(inf_cat.name, inf_cat.score, inf_cat.weight)
-            _render_macro_points(groups.get("inflation", {}), ("CPI", "PCE", "Sticky CPI"))
-            _render_factor_signals(inf_cat)
+            _card_header(t("inflation", lang), inf_cat.score, inf_cat.weight, lang)
+            _render_macro_points(groups.get("inflation", {}), ("CPI", "PCE", "Sticky CPI"), lang)
+            _render_factor_signals(inf_cat, lang)
 
     with col_labor:
         labor_cat = next((c for c in macro_cats if "Labor" in c.name), None)
         if labor_cat:
-            _card_header(labor_cat.name, labor_cat.score, labor_cat.weight)
-            _render_macro_points(groups.get("labor", {}), ("Payrolls", "Unemployment", "Initial Claims"))
-            _render_factor_signals(labor_cat)
+            _card_header(t("labor_market", lang), labor_cat.score, labor_cat.weight, lang)
+            _render_macro_points(groups.get("labor", {}), ("Payrolls", "Unemployment", "Initial Claims"), lang)
+            _render_factor_signals(labor_cat, lang)
 
     # Row 2: Liquidity, Growth, Score Summary
     col_liquidity, col_growth, col_table = st.columns(3)
     with col_liquidity:
         liq_cat = next((c for c in macro_cats if "Liquidity" in c.name), None)
         if liq_cat:
-            _card_header(liq_cat.name, liq_cat.score, liq_cat.weight)
+            _card_header(t("liquidity", lang), liq_cat.score, liq_cat.weight, lang)
             # Net Liquidity
             net_liq = context.get("net_liquidity")
             if net_liq:
-                st.metric("Net Liquidity (WALCL−TGA−RRP)",
+                net_liq_dir_trans = ts(net_liq["direction"].title(), lang)
+                st.metric(t("net_liquidity", lang),
                           _fmt_macro_large(net_liq["current"]),
-                          net_liq["direction"].title())
+                          net_liq_dir_trans)
             else:
-                st.caption("Net liquidity unavailable")
-            _render_macro_points(groups.get("liquidity", {}), ("SOFR",))
-            _render_factor_signals(liq_cat)
+                st.caption(t("net_liquidity_unavail", lang))
+            _render_macro_points(groups.get("liquidity", {}), ("SOFR",), lang)
+            _render_factor_signals(liq_cat, lang)
 
     with col_growth:
         growth_cat = next((c for c in macro_cats if "Growth" in c.name), None)
         if growth_cat:
-            _card_header(growth_cat.name, growth_cat.score, growth_cat.weight)
-            _render_macro_points(groups.get("growth", {}), ("GDP", "Retail Sales", "Industrial Production"))
-            _render_factor_signals(growth_cat)
+            _card_header(t("growth", lang), growth_cat.score, growth_cat.weight, lang)
+            _render_macro_points(groups.get("growth", {}), ("GDP", "Retail Sales", "Industrial Production"), lang)
+            _render_factor_signals(growth_cat, lang)
 
     with col_table:
-        st.markdown("**Category Score Summary**")
-        _render_category_table(total)
+        st.markdown(f"**{t('category_score_summary', lang)}**")
+        _render_category_table(total, lang)
 
-    with st.expander("All FRED macro series"):
-        st.dataframe(_macro_rows(groups), hide_index=True, use_container_width=True)
+    with st.expander(t("all_fred_series", lang)):
+        st.dataframe(_macro_rows(groups, lang), hide_index=True, use_container_width=True)
 
 
-def _render_macro_points(points: Dict[str, Any], labels: tuple) -> None:
+def _render_macro_points(points: Dict[str, Any], labels: tuple, lang: str) -> None:
     for label in labels:
         point = points.get(label)
+        translated_label = ts(label, lang)
         if not point:
-            st.caption(f"{label}: unavailable")
+            st.caption(f"{translated_label}: {t('cot_unavailable', lang)}")
             continue
-        st.metric(label, _fmt_macro_value(point), point.get("direction", "flat").title())
+        direction_trans = ts(point.get("direction", "flat").title(), lang)
+        st.metric(translated_label, _fmt_macro_value(point), direction_trans)
 
 
 # ---------------------------------------------------------------------------
 # Render: calendar (informational, not scored)
 # ---------------------------------------------------------------------------
 
-def _render_calendar(context: Dict[str, Any]) -> None:
+def _render_calendar(context: Dict[str, Any], lang: str) -> None:
     calendar = context.get("calendar")
     if calendar is None:
         return
@@ -406,46 +489,50 @@ def _render_calendar(context: Dict[str, Any]) -> None:
         return
 
     st.divider()
-    st.subheader("Economic Calendar")
-    st.caption(f"Source: {calendar.get('source', 'unknown')} — informational only, not used in scoring.")
+    st.subheader(t("economic_calendar", lang))
+    
+    source_text = t("economic_calendar_source", lang).format(source=calendar.get('source', 'unknown'))
+    st.caption(source_text)
 
     if calendar.get("news_within_60m"):
-        st.error("⚠️ High impact EUR/USD news is within the next 60 minutes.")
+        st.error(t("news_warning", lang))
 
-    _render_events(events)
+    _render_events(events, lang)
     if calendar.get("other_high_impact_events"):
-        with st.expander("Other high-impact events today"):
-            _render_events(calendar["other_high_impact_events"])
+        with st.expander(t("other_events_today", lang)):
+            _render_events(calendar["other_high_impact_events"], lang)
 
 
 # ---------------------------------------------------------------------------
 # Render: category table & factor signals
 # ---------------------------------------------------------------------------
 
-def _render_category_table(total: Dict[str, Any]) -> None:
+def _render_category_table(total: Dict[str, Any], lang: str) -> None:
     rows = []
     for cat in total.get("categories", []):
         score_str = f"{cat['score']:.2f}" if cat["score"] is not None else "—"
         status_icon = {"ok": "✅", "partial": "⚠️", "unavailable": "❌"}.get(cat["status"], "")
         rows.append({
-            "Category": cat["name"],
-            "Weight": cat["weight"],
-            "Score": score_str,
-            "Avail": f"{cat['available_count']}/{cat['total_count']}",
-            "Status": status_icon,
+            t("col_category", lang): ts(cat["name"], lang),
+            t("col_weight", lang): cat["weight"],
+            t("col_score", lang): score_str,
+            t("col_avail", lang): f"{cat['available_count']}/{cat['total_count']}",
+            t("col_status", lang): status_icon,
         })
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
 
-def _render_factor_signals(cat: CategoryResult) -> None:
+def _render_factor_signals(cat: CategoryResult, lang: str) -> None:
     if not cat.factors:
-        st.caption("No factors.")
+        st.caption(t("no_factors", lang))
         return
     for f in cat.factors:
+        translated_name = ts(f.name, lang)
+        translated_reason = ts(f.reason, lang)
         if f.signal is not None:
-            st.caption(f"{_fmt_signal(f.signal)} {f.name}: {f.reason}")
+            st.caption(f"{_fmt_signal(f.signal)} {translated_name}: {translated_reason}")
         else:
-            st.caption(f"— {f.name}: unavailable")
+            st.caption(f"— {translated_name}: {t('cot_unavailable', lang)}")
 
 
 def _fmt_signal(val: float) -> str:
@@ -460,20 +547,23 @@ def _fmt_signal(val: float) -> str:
 # Render: opening range chip
 # ---------------------------------------------------------------------------
 
-def _render_opening_range_chip(title: str, analysis: Dict[str, Any]) -> None:
+def _render_opening_range_chip(title: str, analysis: Dict[str, Any], lang: str) -> None:
     open_value = analysis.get("open")
     high = analysis.get("high")
     low = analysis.get("low")
     if open_value is None or high is None or low is None:
-        st.caption(f"{title}: unavailable")
+        st.caption(f"{title}: {t('cot_unavailable', lang)}")
         return
 
     text_class = analysis.get("text_class", "")
+    translated_label = ts(analysis['label'], lang)
+    translated_detail = ts(analysis['detail'], lang)
+
     st.markdown(
         f"""
         <div class="opening-chip {analysis['css_class']}">
             <div class="opening-chip-title {text_class}">{title}: {_fmt_price(open_value)}</div>
-            <div class="opening-chip-detail">Range {_fmt_price(low)} - {_fmt_price(high)} | {analysis['label']} | {analysis['detail']}</div>
+            <div class="opening-chip-detail">{ts("Range", lang)} {_fmt_price(low)} - {_fmt_price(high)} | {translated_label} | {translated_detail}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -484,84 +574,93 @@ def _render_opening_range_chip(title: str, analysis: Dict[str, Any]) -> None:
 # Render: events
 # ---------------------------------------------------------------------------
 
-def _render_events(events: List[Dict[str, Any]]) -> None:
+def _render_events(events: List[Dict[str, Any]], lang: str) -> None:
     if not events:
-        st.caption("No scheduled EUR/USD calendar events for today.")
+        st.caption("No scheduled EUR/USD calendar events for today." if lang == "en" else "На сегодня нет запланированных важных новостей по EUR/USD.")
         return
     for event in events:
         event_time = event["time_utc"].astimezone(BERLIN_TZ)
-        meta = f"{event_time.strftime('%H:%M %Z')} | {event['currency']} | {str(event['impact']).title()}"
+        impact_translated = ts(str(event['impact']).title(), lang)
+        meta = f"{event_time.strftime('%H:%M %Z')} | {event['currency']} | {impact_translated}"
         details = []
         if event.get("forecast"):
-            details.append(f"Forecast: {event['forecast']}")
+            forecast_lbl = "Forecast" if lang == "en" else "Прогноз"
+            details.append(f"{forecast_lbl}: {event['forecast']}")
         if event.get("previous"):
-            details.append(f"Previous: {event['previous']}")
+            prev_lbl = "Previous" if lang == "en" else "Предыдущее"
+            details.append(f"{prev_lbl}: {event['previous']}")
         suffix = f" ({', '.join(details)})" if details else ""
-        st.markdown(f"**{meta}**  \n{event.get('title', '')}{suffix}")
+        
+        event_title = event.get('title', '')
+        st.markdown(f"**{meta}**  \n{event_title}{suffix}")
 
 
 # ---------------------------------------------------------------------------
 # Render: data sources
 # ---------------------------------------------------------------------------
 
-def _render_sources(context: Dict[str, Any]) -> None:
+def _render_sources(context: Dict[str, Any], lang: str) -> None:
     st.divider()
-    st.subheader("Data Status")
+    st.subheader(t("data_status", lang))
+    
     rows = [
-        {"Dataset": "EUR/USD daily OHLC", "Source": context["eurusd"]["source"]},
-        {"Dataset": "DXY direction", "Source": context["dxy"]["source"] if context.get("dxy") else "unavailable"},
-        {"Dataset": "Macro regime FRED series", "Source": context["macro"]["source"]},
-        {"Dataset": "Euro FX COT", "Source": context["cot"]["source"] if context.get("cot") else "unavailable"},
-        {"Dataset": "Yield Spread (10Y−2Y)", "Source": context["yield_spread"]["source"] if context.get("yield_spread") else "unavailable"},
-        {"Dataset": "Net Liquidity", "Source": context["net_liquidity"]["source"] if context.get("net_liquidity") else "unavailable"},
-        {"Dataset": "Economic calendar", "Source": context["calendar"]["source"] if context.get("calendar") else "unavailable"},
+        {t("dataset", lang): ts("EUR/USD daily OHLC", lang), t("source", lang): context["eurusd"]["source"]},
+        {t("dataset", lang): ts("DXY direction", lang), t("source", lang): context["dxy"]["source"] if context.get("dxy") else t("cot_unavailable", lang)},
+        {t("dataset", lang): ts("Macro regime FRED series", lang), t("source", lang): context["macro"]["source"]},
+        {t("dataset", lang): ts("Euro FX COT", lang), t("source", lang): context["cot"]["source"] if context.get("cot") else t("cot_unavailable", lang)},
+        {t("dataset", lang): ts("Yield Spread (10Y−2Y)", lang), t("source", lang): context["yield_spread"]["source"] if context.get("yield_spread") else t("cot_unavailable", lang)},
+        {t("dataset", lang): ts("Net Liquidity", lang), t("source", lang): context["net_liquidity"]["source"] if context.get("net_liquidity") else t("cot_unavailable", lang)},
+        {t("dataset", lang): ts("Economic calendar", lang), t("source", lang): context["calendar"]["source"] if context.get("calendar") else t("cot_unavailable", lang)},
     ]
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
-    st.caption("Calendar events are informational only and do not contribute to the bias score.")
+    st.caption(t("calendar_info_caption", lang))
 
 
 # ---------------------------------------------------------------------------
 # Render: diagnostics
 # ---------------------------------------------------------------------------
 
-def _render_diagnostics(total: Dict[str, Any]) -> None:
+def _render_diagnostics(total: Dict[str, Any], lang: str) -> None:
     st.divider()
-    st.subheader("Diagnostics & Data Freshness")
-    st.caption("Detailed view of mathematical weight renormalization and underlying data points.")
+    st.subheader(t("diagnostics_title", lang))
+    st.caption(t("diagnostics_caption", lang))
 
     col1, col2 = st.columns(2)
 
     with col1:
-        st.markdown("**Category Contributions & Renormalization**")
+        st.markdown(f"**{t('renormalization_title', lang)}**")
         diag_rows = []
         for cat in total.get("categories", []):
             score_str = f"{cat['score']:.2f}" if cat["score"] is not None else "—"
             rw_pct = f"{cat['renormalized_weight'] * 100:.1f}%" if cat["score"] is not None else "0.0%"
             contrib_str = f"{cat['normalized_contribution']:.4f}" if cat["score"] is not None else "—"
             diag_rows.append({
-                "Category": cat["name"],
-                "Base Weight": cat["weight"],
-                "Renormalized Weight": rw_pct,
-                "Category Score": score_str,
-                "Normalized Contribution": contrib_str,
+                t("col_category", lang): ts(cat["name"], lang),
+                t("col_base_weight", lang): cat["weight"],
+                t("col_renorm_weight", lang): rw_pct,
+                t("col_cat_score", lang): score_str,
+                t("col_norm_contrib", lang): contrib_str,
             })
         st.dataframe(pd.DataFrame(diag_rows), hide_index=True, use_container_width=True)
 
     with col2:
-        st.markdown("**Underlying Factor Details**")
+        st.markdown(f"**{t('factor_details_title', lang)}**")
         factor_rows = []
         for cat in total.get("categories", []):
             for f in cat["factors"]:
                 sig_str = f"{f['signal']:+.1f}" if f["signal"] is not None else "—"
-                freshness_icon = "🟢 Fresh" if f["freshness"] == "fresh" else ("🔴 Stale" if f["freshness"] == "stale" else "⚪ Unknown")
+                
+                fresh_val = f["freshness"]
+                freshness_icon = t("fresh_val", lang) if fresh_val == "fresh" else (t("stale_val", lang) if fresh_val == "stale" else t("unknown_val", lang))
+                
                 factor_rows.append({
-                    "Category": cat["name"],
-                    "Factor": f["name"],
-                    "Signal": sig_str,
-                    "Timestamp": f["timestamp"],
-                    "Source": f["source"],
-                    "Freshness": freshness_icon,
+                    t("col_category", lang): ts(cat["name"], lang),
+                    t("col_factor", lang): ts(f["name"], lang),
+                    t("col_signal", lang): sig_str,
+                    t("col_timestamp", lang): f["timestamp"],
+                    t("source", lang): f["source"],
+                    t("col_freshness", lang): freshness_icon,
                 })
         st.dataframe(pd.DataFrame(factor_rows), hide_index=True, use_container_width=True)
 
@@ -596,9 +695,40 @@ def _fmt_macro_large(value: float) -> str:
     return f"{value:.2f}"
 
 
-def _card_header(title: str, score: Optional[float], weight: float = 0) -> None:
+def _macro_rows(groups: Dict[str, Dict[str, Any]], lang: str) -> pd.DataFrame:
+    rows = []
+    for group_name, points in groups.items():
+        for label, point in points.items():
+            translated_group = ts(group_name.title(), lang)
+            translated_label = ts(label, lang)
+            if point is None:
+                rows.append({
+                    t("col_category", lang): translated_group,
+                    t("col_factor", lang): translated_label,
+                    "FRED ID": "",
+                    t("col_score", lang) if lang == "en" else "Последнее": t("cot_unavailable", lang),
+                    "Previous": "",
+                    "Direction": "",
+                    "Date": "",
+                    "Source": t("cot_unavailable", lang),
+                })
+                continue
+            rows.append({
+                t("col_category", lang): translated_group,
+                t("col_factor", lang): translated_label,
+                "FRED ID": point.get("series_id", ""),
+                t("col_score", lang) if lang == "en" else "Последнее": _fmt_macro_value(point),
+                "Previous": _fmt_macro_value(point, previous=True),
+                "Direction": ts(str(point.get("direction", "flat")).title(), lang),
+                "Date": point.get("date", ""),
+                "Source": point.get("source", ""),
+            })
+    return pd.DataFrame(rows)
+
+
+def _card_header(title: str, score: Optional[float], weight: float = 0, lang: str = "en") -> None:
     score_text = f"{score:.2f}" if score is not None else "—"
-    weight_text = f"wt {weight:.1f}" if weight else ""
+    weight_text = f"{t('weight_lbl', lang)} {weight:.1f}" if weight else ""
     st.markdown(
         f"""
         <div class="section-card-title">
@@ -608,35 +738,6 @@ def _card_header(title: str, score: Optional[float], weight: float = 0) -> None:
         """,
         unsafe_allow_html=True,
     )
-
-
-def _macro_rows(groups: Dict[str, Dict[str, Any]]) -> pd.DataFrame:
-    rows = []
-    for group_name, points in groups.items():
-        for label, point in points.items():
-            if point is None:
-                rows.append({
-                    "Group": group_name.title(),
-                    "Name": label,
-                    "FRED ID": "",
-                    "Latest": "unavailable",
-                    "Previous": "",
-                    "Direction": "",
-                    "Date": "",
-                    "Source": "unavailable",
-                })
-                continue
-            rows.append({
-                "Group": group_name.title(),
-                "Name": label,
-                "FRED ID": point.get("series_id", ""),
-                "Latest": _fmt_macro_value(point),
-                "Previous": _fmt_macro_value(point, previous=True),
-                "Direction": str(point.get("direction", "flat")).title(),
-                "Date": point.get("date", ""),
-                "Source": point.get("source", ""),
-            })
-    return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------

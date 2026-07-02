@@ -5,3 +5,5 @@ __pycache__/
 *.py[cod]
 .DS_Store
 .streamlit/secrets.toml
+scratch/data_cache/
+scratch/backtest_results.csv
