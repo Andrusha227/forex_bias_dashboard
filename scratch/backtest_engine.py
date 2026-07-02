@@ -32,11 +32,17 @@ def get_point_in_time_fred_point(series_id, observations, t_str):
     
     # Sort by date ascending
     df_pit = df_pit.sort_values("date").reset_index(drop=True)
-    if len(df_pit) < 2:
+    
+    # Convert to list of dicts and transform
+    pit_list = df_pit[["date", "value"]].to_dict(orient="records")
+    from src.data.fred_data import _transform_points
+    pit_list = _transform_points(series_id, pit_list)
+    
+    if len(pit_list) < 2:
         return None
         
-    latest_row = df_pit.iloc[-1]
-    prev_row = df_pit.iloc[-2]
+    latest_row = pit_list[-1]
+    prev_row = pit_list[-2]
     
     latest_val = float(latest_row["value"])
     prev_val = float(prev_row["value"])
@@ -48,14 +54,18 @@ def get_point_in_time_fred_point(series_id, observations, t_str):
     else:
         direction = "flat"
         
+    latest_date_str = latest_row["date"]
+    matching_rows = df[df["date"] == latest_date_str]
+    timestamp = matching_rows["realtime_start"].max() if not matching_rows.empty else t_str
+        
     return {
         "series_id": series_id,
         "source": "fred",
         "latest": latest_val,
         "previous": prev_val,
         "direction": direction,
-        "date": latest_row["date"],
-        "timestamp": latest_row["realtime_start"],
+        "date": latest_date_str,
+        "timestamp": timestamp,
         "freshness": "fresh",
     }
 

@@ -56,6 +56,7 @@ def get_macro_regime_data() -> Dict[str, Any]:
         for label, series_id in series_map.items():
             try:
                 points = _fetch_fred_points(series_id, api_key)
+                points = _transform_points(series_id, points)
                 groups[group_name][label] = _points_direction(series_id, points, source="fred")
                 any_success = True
             except Exception:
@@ -225,7 +226,7 @@ def _fetch_fred_series(series_id: str, api_key: str) -> pd.Series:
     return pd.Series(values)
 
 
-def _fetch_fred_points(series_id: str, api_key: str, limit: int = 8) -> List[Dict[str, Any]]:
+def _fetch_fred_points(series_id: str, api_key: str, limit: int = 24) -> List[Dict[str, Any]]:
     response = requests.get(
         FRED_OBSERVATIONS_URL,
         params={
@@ -249,6 +250,52 @@ def _fetch_fred_points(series_id: str, api_key: str, limit: int = 8) -> List[Dic
         raise ValueError(f"Not enough FRED observations for {series_id}")
 
     return list(reversed(points))
+
+
+def _transform_points(series_id: str, points: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Transform raw index levels into YoY or MoM rates where appropriate."""
+    if series_id in ("CPIAUCSL", "PCEPI", "CORESTICKM159SFRBATL", "RSAFS", "INDPRO"):
+        # YoY change (12 months lag)
+        transformed = []
+        for i in range(12, len(points)):
+            val_now = points[i]["value"]
+            val_past = points[i - 12]["value"]
+            if val_past != 0:
+                yoy = (val_now - val_past) / val_past * 100.0
+                transformed.append({"date": points[i]["date"], "value": yoy})
+        return transformed
+        
+    elif series_id == "GDP":
+        # YoY change (4 quarters lag)
+        transformed = []
+        for i in range(4, len(points)):
+            val_now = points[i]["value"]
+            val_past = points[i - 4]["value"]
+            if val_past != 0:
+                yoy = (val_now - val_past) / val_past * 100.0
+                transformed.append({"date": points[i]["date"], "value": yoy})
+        return transformed
+        
+    elif series_id == "PAYEMS":
+        # MoM Change vs 3-month SMA
+        mom_changes = []
+        for i in range(1, len(points)):
+            change = points[i]["value"] - points[i - 1]["value"]
+            mom_changes.append({"date": points[i]["date"], "value": change})
+            
+        if len(mom_changes) >= 3:
+            change_t = mom_changes[-1]["value"]
+            change_t_1 = mom_changes[-2]["value"]
+            change_t_2 = mom_changes[-3]["value"]
+            sma_t = (change_t + change_t_1 + change_t_2) / 3.0
+            
+            return [
+                {"date": mom_changes[-1]["date"], "value": sma_t},
+                {"date": mom_changes[-1]["date"], "value": change_t}
+            ]
+        return mom_changes
+        
+    return points
 
 
 def _series_direction(series: pd.Series) -> Dict[str, Any]:
